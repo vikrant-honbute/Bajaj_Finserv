@@ -120,7 +120,7 @@ def retrieve_factsheet_info(
             "fund_category": meta.get("fund_category", "General"),
             "element_type": meta.get("element_type", "text"),
             "relevance_score": round(float(score), 4),
-            "preview": doc.page_content[:200].replace("\n", " "),
+            "preview": doc.page_content[:400].replace("\n", " "),
         })
 
     result = {

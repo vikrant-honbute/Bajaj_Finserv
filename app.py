@@ -305,7 +305,7 @@ def render_sources(sources: list[dict]):
             section = src.get("section", "unknown")
             elem_type = src.get("element_type", "text")
             score = src.get("relevance_score", 0)
-            preview = src.get("preview", "")[:150]
+            preview = src.get("preview", "")[:350]
 
             section_display = section.replace("_", " ").title()
             type_icon = "📊" if elem_type == "Table" else "📝"
