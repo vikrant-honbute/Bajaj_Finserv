@@ -191,3 +191,18 @@ The authenticated session should contain:
     "name": "..."
 }
 ```
+
+6. Cross-Sell Engine (Deterministic, not LLM-decided)
+- Evaluates: `App_score`, `DPD_30`, `DPD_90`, `Imputed_Income`, `Loan_status`, `Loan_amount`, `Age`, `Employment_type`, loan history.
+- Applies **rule-based thresholds** (for particular customer), e.g.:
+  ```
+  IF Loan_status = Active
+  AND DPD_30 = 0
+  AND DPD_90 = 0
+  AND App_score >= threshold
+  AND Imputed_Income >= threshold
+  THEN CrossSellEligible = TRUE
+  ```
+- Output is a simple `Eligible / Not Eligible` (+ optionally a reason/signal summary) passed to the Chat Agent to phrase naturally — e.g., surfaced conversationally after a loan question, not as a hard sales interruption.
+- Validated against the full 10K dataset to produce a defensible qualification rate for the demo (e.g., "X of 10,000 customers qualify").
+- Framed explicitly as a **prototype business rule**, not a regulated suitability model.

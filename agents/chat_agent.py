@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 # ── LLM Configuration ────────────────────────────────────────────────────────
 
-DEFAULT_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_MODEL = "llama-3.1-8b-instant"
 DEFAULT_TEMPERATURE = 0.3
 MAX_TOKENS = 4096
 
