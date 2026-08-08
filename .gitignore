@@ -32,3 +32,4 @@ Thumbs.db
 
 # Project artifacts
 .facts/
+.env
