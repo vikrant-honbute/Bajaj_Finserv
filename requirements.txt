@@ -1,6 +1,5 @@
 langsmith
 langchain
-unstructured
 transformers
 PyMuPDF
 faiss-cpu
@@ -16,3 +15,7 @@ langgraph
 langchain-huggingface
 langchain-community
 langchain-classic
+langchain-text-splitters
+unstructured[pdf]
+unstructured-inference
+
