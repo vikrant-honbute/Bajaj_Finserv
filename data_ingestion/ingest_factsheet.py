@@ -1,9 +1,8 @@
 """
 Factsheet PDF → FAISS Vector Database Ingestion Pipeline.
 
-Uses the `unstructured` library for intelligent PDF parsing with native
-table detection, then enriches each element with structured metadata
-and stores in a FAISS vector index via LangChain.
+Uses PyMuPDF for PDF text extraction, then enriches each page with
+structured metadata and stores in a FAISS vector index via LangChain.
 
 Usage:
     python -m data_ingestion.ingest_factsheet
@@ -18,6 +17,7 @@ import sys
 import time
 from pathlib import Path
 
+import pymupdf
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -86,181 +86,118 @@ def _detect_fund_for_page(page_num: int, text: str) -> str | None:
     return None
 
 
-# ── Table Formatting ─────────────────────────────────────────────────────────
+# ── Table Detection Heuristics ───────────────────────────────────────────────
 
-def _format_table_element(element) -> str:
+def _detect_tables_in_text(text: str) -> tuple[list[str], str]:
     """
-    Convert an unstructured Table element into a clean markdown/text
-    representation that embeds well.
+    Simple heuristic to detect table-like content in extracted text.
     
-    The `unstructured` library provides table data in element.metadata.text_as_html
-    when available. We convert it to a readable markdown table or fall back 
-    to the plain text representation.
+    Returns (table_texts, remaining_text).
+    Tables are identified by lines with multiple tab/pipe separators or
+    consistent column-like formatting.
     """
-    html = getattr(element.metadata, "text_as_html", None)
+    lines = text.split("\n")
+    table_lines: list[str] = []
+    text_lines: list[str] = []
+    current_table: list[str] = []
+    tables: list[str] = []
 
-    if html:
-        return _html_table_to_markdown(html)
+    for line in lines:
+        stripped = line.strip()
+        # Heuristic: a table row has multiple columns separated by
+        # 2+ spaces, tabs, or pipes
+        has_columns = (
+            len(re.split(r"\s{2,}|\t|\|", stripped)) >= 3
+            and len(stripped) > 10
+        )
 
-    # Fallback: use the element's text directly
-    return str(element)
+        if has_columns:
+            current_table.append(stripped)
+        else:
+            if current_table and len(current_table) >= 2:
+                # We had a table, save it
+                tables.append("\n".join(current_table))
+                current_table = []
+            elif current_table:
+                # Too short to be a table, treat as text
+                text_lines.extend(current_table)
+                current_table = []
+            text_lines.append(line)
 
+    # Final flush
+    if current_table and len(current_table) >= 2:
+        tables.append("\n".join(current_table))
+    elif current_table:
+        text_lines.extend(current_table)
 
-def _html_table_to_markdown(html: str) -> str:
-    """Convert an HTML table string to a readable markdown table."""
-    try:
-        # Simple regex-based HTML table → markdown conversion
-        # Remove tags and format as clean text table
-        rows: list[list[str]] = []
-        for row_match in re.finditer(r"<tr[^>]*>(.*?)</tr>", html, re.DOTALL):
-            row_html = row_match.group(1)
-            cells = re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", row_html, re.DOTALL)
-            # Clean HTML tags from cell content
-            cleaned = [re.sub(r"<[^>]+>", "", cell).strip() for cell in cells]
-            if any(c for c in cleaned):  # skip completely empty rows
-                rows.append(cleaned)
-
-        if not rows:
-            # Fallback: strip all tags
-            return re.sub(r"<[^>]+>", " ", html).strip()
-
-        # Build markdown table
-        if len(rows) < 2:
-            return " | ".join(rows[0]) if rows else ""
-
-        # Normalize column count
-        max_cols = max(len(row) for row in rows)
-        for row in rows:
-            while len(row) < max_cols:
-                row.append("")
-
-        lines: list[str] = []
-        # Header
-        lines.append("| " + " | ".join(rows[0]) + " |")
-        lines.append("| " + " | ".join("---" for _ in rows[0]) + " |")
-        # Data rows
-        for row in rows[1:]:
-            lines.append("| " + " | ".join(row) + " |")
-
-        return "\n".join(lines)
-
-    except Exception:
-        # If parsing fails, just strip tags
-        return re.sub(r"<[^>]+>", " ", html).strip()
+    return tables, "\n".join(text_lines)
 
 
-# ── Unstructured PDF Extraction ──────────────────────────────────────────────
+# ── PyMuPDF PDF Extraction ───────────────────────────────────────────────────
 
-def extract_elements_from_pdf(pdf_path: Path) -> list:
+def extract_pages_from_pdf(pdf_path: Path) -> dict[int, str]:
     """
-    Extract structured elements from the PDF using `unstructured`.
-
-    Uses the 'fast' strategy with PyMuPDF under the hood for text,
-    and detects tables as separate elements.
+    Extract text from each page of the PDF using PyMuPDF.
+    
+    Returns a dict mapping 1-indexed page numbers to their text content.
     """
-    from unstructured.partition.pdf import partition_pdf
-
-    logger.info("Partitioning PDF with unstructured (this may take a minute)...")
+    logger.info(f"Extracting text from PDF with PyMuPDF...")
     start = time.time()
 
-    elements = partition_pdf(
-        filename=str(pdf_path),
-        strategy="fast",
-        include_page_breaks=True,
-        infer_table_structure=True,
-    )
+    doc = pymupdf.open(str(pdf_path))
+    pages: dict[int, str] = {}
 
+    for page_num_0 in range(len(doc)):
+        page_num = page_num_0 + 1  # Convert to 1-indexed
+        page = doc[page_num_0]
+        text = page.get_text("text")
+        if text.strip():
+            pages[page_num] = text
+
+    doc.close()
     elapsed = time.time() - start
-    logger.info(f"Extracted {len(elements)} elements in {elapsed:.1f}s")
-    return elements
+    logger.info(f"Extracted text from {len(pages)} pages in {elapsed:.1f}s")
+    return pages
 
 
 # ── Build LangChain Documents ────────────────────────────────────────────────
 
-def _get_element_page(element) -> int:
-    """Get 1-indexed page number from an unstructured element."""
-    page = getattr(element.metadata, "page_number", None)
-    return page if page else 1
-
-
-def build_documents(elements: list) -> list[Document]:
+def build_documents(pages: dict[int, str]) -> list[Document]:
     """
-    Convert unstructured elements into LangChain Documents with rich metadata.
+    Convert extracted page texts into LangChain Documents with rich metadata.
 
-    Groups elements by page, applies fund detection, section classification,
-    and handles tables specially.
+    Applies fund detection, section classification, and handles tables
+    and large pages with chunking.
     """
-    from unstructured.documents.elements import (
-        PageBreak,
-        Table,
-    )
-
     documents: list[Document] = []
     skipped_pages = 0
     table_count = 0
     text_count = 0
 
-    # Group elements by page
-    page_elements: dict[int, list] = {}
-    for element in elements:
-        if isinstance(element, PageBreak):
-            continue
-        page_num = _get_element_page(element)
-        page_elements.setdefault(page_num, []).append(element)
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP,
+        separators=["\n\n", "\n", ". ", ", ", " "],
+        length_function=len,
+    )
 
-    logger.info(f"Processing {len(page_elements)} pages...")
+    logger.info(f"Processing {len(pages)} pages...")
 
-    for page_num in sorted(page_elements.keys()):
+    for page_num in sorted(pages.keys()):
         # Skip non-useful pages
         if page_num in SKIP_PAGES:
             skipped_pages += 1
             continue
 
-        elems = page_elements[page_num]
+        full_text = pages[page_num]
         section = get_section(page_num)
 
-        # Collect all text on the page for fund detection
-        full_page_text = " ".join(str(e) for e in elems)
-        fund_name = _detect_fund_for_page(page_num, full_page_text)
+        # Detect fund for this page
+        fund_name = _detect_fund_for_page(page_num, full_text)
         fund_category = get_fund_category(fund_name)
 
-        # Separate tables from other elements
-        tables = [e for e in elems if isinstance(e, Table)]
-        non_tables = [e for e in elems if not isinstance(e, Table)]
-
-        # ── Handle tables as individual documents ────────────────────
-        for table_idx, table_elem in enumerate(tables):
-            table_text = _format_table_element(table_elem)
-            if not table_text.strip():
-                continue
-
-            # Try to find a title/context for the table from surrounding elements
-            table_context = _find_table_context(non_tables, table_elem)
-            if table_context:
-                table_text = f"{table_context}\n\n{table_text}"
-
-            doc = Document(
-                page_content=table_text,
-                metadata={
-                    "source": PDF_PATH.name,
-                    "page_number": page_num,
-                    "section": section,
-                    "fund_name": fund_name or "General",
-                    "fund_category": fund_category or "General",
-                    "data_date": DATA_DATE,
-                    "element_type": "Table",
-                    "chunk_index": f"table_{table_idx}",
-                },
-            )
-            documents.append(doc)
-            table_count += 1
-
-        # ── Handle non-table text ────────────────────────────────────
-        text_content = "\n".join(
-            str(e) for e in non_tables if str(e).strip()
-        )
-        if not text_content.strip():
-            continue
+        # Detect tables in the text
+        tables, remaining_text = _detect_tables_in_text(full_text)
 
         base_metadata = {
             "source": PDF_PATH.name,
@@ -269,23 +206,41 @@ def build_documents(elements: list) -> list[Document]:
             "fund_name": fund_name or "General",
             "fund_category": fund_category or "General",
             "data_date": DATA_DATE,
+        }
+
+        # ── Handle detected tables as individual documents ───────
+        for table_idx, table_text in enumerate(tables):
+            if not table_text.strip():
+                continue
+            doc = Document(
+                page_content=table_text,
+                metadata={
+                    **base_metadata,
+                    "element_type": "Table",
+                    "chunk_index": f"table_{table_idx}",
+                },
+            )
+            documents.append(doc)
+            table_count += 1
+
+        # ── Handle remaining text ────────────────────────────────
+        text_content = remaining_text.strip()
+        if not text_content:
+            continue
+
+        text_metadata = {
+            **base_metadata,
             "element_type": "NarrativeText",
         }
 
         # Split large pages into smaller chunks
         if len(text_content) > LARGE_PAGE_THRESHOLD:
-            splitter = RecursiveCharacterTextSplitter(
-                chunk_size=CHUNK_SIZE,
-                chunk_overlap=CHUNK_OVERLAP,
-                separators=["\n\n", "\n", ". ", ", ", " "],
-                length_function=len,
-            )
             chunks = splitter.split_text(text_content)
             for chunk_idx, chunk in enumerate(chunks):
                 doc = Document(
                     page_content=chunk,
                     metadata={
-                        **base_metadata,
+                        **text_metadata,
                         "chunk_index": f"text_{chunk_idx}",
                     },
                 )
@@ -295,7 +250,7 @@ def build_documents(elements: list) -> list[Document]:
             doc = Document(
                 page_content=text_content,
                 metadata={
-                    **base_metadata,
+                    **text_metadata,
                     "chunk_index": "text_0",
                 },
             )
@@ -308,29 +263,6 @@ def build_documents(elements: list) -> list[Document]:
         f"{skipped_pages} pages skipped)"
     )
     return documents
-
-
-def _find_table_context(non_table_elements: list, table_element) -> str | None:
-    """
-    Find the most relevant title/heading near a table to provide context.
-    
-    Looks for Title or NarrativeText elements that appear before the table
-    on the same page and could serve as a table header/description.
-    """
-    from unstructured.documents.elements import Title
-
-    # Collect titles from the page
-    titles = [str(e) for e in non_table_elements if isinstance(e, Title)]
-    if titles:
-        return titles[0]  # First title on the page is usually the section heading
-
-    # Fallback: first short text element as context
-    for e in non_table_elements:
-        text = str(e).strip()
-        if text and len(text) < 200:
-            return text
-
-    return None
 
 
 # ── Multi-Fund Page Handling ─────────────────────────────────────────────────
@@ -507,11 +439,11 @@ def run_ingestion() -> None:
         sys.exit(1)
     logger.info(f"PDF: {PDF_PATH} ({PDF_PATH.stat().st_size / 1024 / 1024:.1f} MB)")
 
-    # Step 2: Extract elements using unstructured
-    elements = extract_elements_from_pdf(PDF_PATH)
+    # Step 2: Extract text from each page using PyMuPDF
+    pages = extract_pages_from_pdf(PDF_PATH)
 
     # Step 3: Build documents with metadata
-    documents = build_documents(elements)
+    documents = build_documents(pages)
 
     # Step 4: Handle multi-fund pages (performance/SIP/risk)
     documents = _split_multi_fund_pages(documents)
