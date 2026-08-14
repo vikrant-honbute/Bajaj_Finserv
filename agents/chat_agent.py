@@ -18,6 +18,10 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_groq import ChatGroq
 
+from langchain_core.tools import tool as langchain_tool
+from pydantic import BaseModel, Field
+
+from agents.cross_sell_engine import evaluate_cross_sell_eligibility
 from agents.prompts import SYSTEM_PROMPT
 from agents.rag_agent import retrieve_factsheet_info, parse_rag_response
 from agents.sql_agent import query_customer_db
@@ -25,9 +29,58 @@ from agents.sql_agent import query_customer_db
 load_dotenv()
 logger = logging.getLogger(__name__)
 
+
+# ── Cross-Sell Tool ──────────────────────────────────────────────────────────
+
+class CrossSellInput(BaseModel):
+    """Input schema for the cross-sell evaluation tool."""
+    customer_identifier: str = Field(
+        description="The authenticated customer's phone number or name."
+    )
+
+
+@langchain_tool(args_schema=CrossSellInput)
+def evaluate_cross_sell(customer_identifier: str) -> str:
+    """
+    Evaluate whether the current customer qualifies for a mutual fund cross-sell.
+
+    Use this tool when:
+    - The customer asks about investment recommendations.
+    - The customer's loan situation looks positive and they might benefit from investing.
+    - The customer asks what other products or services are available.
+
+    Returns eligibility status, risk profile, suggested funds, and SIP estimate.
+    """
+    import sqlite3
+    from pathlib import Path
+
+    db_path = Path(__file__).resolve().parent.parent / "customer_data.db"
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute(
+            "SELECT * FROM customers WHERE MobileNo = ? OR Name = ? COLLATE NOCASE",
+            (customer_identifier, customer_identifier),
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        if row is None:
+            return json.dumps({"eligible": False, "error": "Customer not found"})
+
+        customer_data = dict(row)
+        result = evaluate_cross_sell_eligibility(customer_data)
+        return json.dumps(result.model_dump(), ensure_ascii=False)
+
+    except Exception as e:
+        logger.error(f"Cross-sell evaluation error: {e}")
+        return json.dumps({"eligible": False, "error": str(e)})
+
+
 # ── LLM Configuration ────────────────────────────────────────────────────────
 
-DEFAULT_MODEL = "llama-3.1-8b-instant"
+DEFAULT_MODEL = "llama-3.3-70b-versatile"
 DEFAULT_TEMPERATURE = 0.3
 MAX_TOKENS = 4096
 
@@ -57,7 +110,7 @@ class ChatAgent:
 
     def __init__(self, model: str = DEFAULT_MODEL):
         self.llm = _create_llm(model=model)
-        self.tools = [retrieve_factsheet_info, query_customer_db]
+        self.tools = [retrieve_factsheet_info, query_customer_db, evaluate_cross_sell]
         self.llm_with_tools = self.llm.bind_tools(self.tools)
         self._tool_map = {t.name: t for t in self.tools}
 
