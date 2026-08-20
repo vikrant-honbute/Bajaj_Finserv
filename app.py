@@ -19,6 +19,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from agents.cross_sell_engine import evaluate_cross_sell_eligibility
+from stt_pipeline import transcribe_audio
 
 load_dotenv()
 
@@ -491,7 +492,7 @@ def render_sidebar():
         # ── Footer ───────────────────────────────────────────────────
         st.markdown("---")
         st.caption("📊 Data: Factsheet June 2026")
-        st.caption("🤖 Model: Llama 3.3 70B via Groq")
+        st.caption("🤖 Model: openai/gpt-oss-20b via Groq")
         st.caption("🔍 Traced via LangSmith")
 
 
@@ -651,6 +652,156 @@ def render_recommendations():
     st.markdown("---")
 
 
+# ── Message Submission & Voice Input ─────────────────────────────────────────
+
+def submit_user_message(prompt: str, chat_container):
+    """Send a user prompt through the existing chat agent flow and render the reply."""
+    st.session_state.messages.append({"role": "user", "content": prompt})
+
+    with chat_container:
+        # Render the new message INSIDE the left column to maintain symmetry
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        # Get agent response
+        with st.chat_message("assistant"):
+            with st.spinner("🤔 Thinking..."):
+                try:
+                    agent = get_chat_agent()
+
+                    # Build chat history (exclude sources metadata for LLM)
+                    chat_history = [
+                        {"role": m["role"], "content": m["content"]}
+                        for m in st.session_state.messages[:-1]  # exclude current message
+                    ]
+
+                    result = agent.invoke(
+                        user_input=prompt,
+                        chat_history=chat_history,
+                        customer_identifier=st.session_state.customer["identifier"],
+                    )
+
+                    response_text = result["response"]
+                    sources = result.get("sources", [])
+
+                    st.markdown(response_text)
+
+                    if sources:
+                        render_sources(sources)
+
+                    # Save to session state
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": response_text,
+                        "sources": sources,
+                        "used_rag": result.get("used_rag", False),
+                    })
+
+                except Exception as e:
+                    error_msg = f"Sorry, I encountered an error: {str(e)}"
+                    st.error(error_msg)
+                    logger.exception("Agent invocation failed")
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": error_msg,
+                        "sources": [],
+                    })
+
+
+def _process_recorded_voice(mic, chat_scroll):
+    """Transcribe a finished mic recording and send it as the question (auto-send)."""
+    # Avoid re-processing the same recording on later reruns.
+    file_id = getattr(mic, "file_id", None)
+    if file_id and file_id == st.session_state.get("voice_last_sent_file"):
+        return
+
+    if file_id:
+        st.session_state.voice_last_sent_file = file_id
+
+    with st.spinner("🎤 Transcribing your voice…"):
+        try:
+            transcript = transcribe_audio(mic)
+        except (ValueError, RuntimeError) as e:
+            st.error(str(e))
+            logger.warning("Voice transcription failed: %s", e)
+            return
+        except Exception as e:
+            st.error(f"Unexpected error while transcribing your voice: {e}")
+            logger.exception("Voice transcription failed")
+            return
+
+    transcript = (transcript or "").strip()
+    if not transcript:
+        st.error("Sorry, I couldn't hear anything. Please try recording again.")
+        return
+
+    # Reset the mic so it is ready for the next recording.
+    try:
+        st.session_state["composer_mic"] = None
+    except Exception:
+        pass
+
+    # Auto-send the transcribed question through the existing chat flow.
+    submit_user_message(transcript, chat_scroll)
+
+
+def render_chat_composer(chat_scroll):
+    """
+    ChatGPT-style query bar: text box, mic, and Send in one row.
+
+    - Type and press Enter (or click Send) to send text.
+    - Click the mic to record; the question is transcribed by Groq Whisper and
+      sent automatically the moment the recording stops.
+    """
+    with st.container(border=True, key="chat_composer"):
+        c_input, c_mic, c_send = st.columns(
+            [1.0, 0.18, 0.26],
+            vertical_alignment="center",
+            gap="small",
+        )
+
+        with c_input:
+            typed = st.text_input(
+                "Ask a question",
+                key="composer_input",
+                label_visibility="collapsed",
+                placeholder="Ask about mutual funds, your loan, or financial products...",
+            )
+
+        with c_mic:
+            mic = st.audio_input(
+                "Record a question",
+                key="composer_mic",
+                label_visibility="collapsed",
+                width=150,
+                help="🎤 Click the mic, speak your question — it is transcribed "
+                     "and sent automatically when you stop recording.",
+            )
+
+        with c_send:
+            send_pressed = st.button(
+                "Send",
+                key="composer_send",
+                type="primary",
+                use_container_width=True,
+                shortcut="Enter",
+                icon=":material/send:",
+            )
+
+    # ── Voice: auto-transcribe & auto-send (no extra taps) ───────────
+    if mic is not None:
+        _process_recorded_voice(mic, chat_scroll)
+        return
+
+    # ── Text: send via button (or the Enter shortcut) ─────────────────
+    if send_pressed:
+        prompt = (typed or "").strip()
+        if prompt:
+            submit_user_message(prompt, chat_scroll)
+            st.session_state["composer_input"] = ""
+            st.rerun()
+
+
 def render_chat():
     """Render the main chat area."""
     # Header
@@ -688,69 +839,19 @@ def render_chat():
         render_recommendations()
 
     with chat_col:
-        # ── Chat History ─────────────────────────────────────────────────
-        for i, msg in enumerate(st.session_state.messages):
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
+        # ── Chat History (fixed-height scroll so the composer stays visible) ──
+        with st.container(height=520, key="chat_history_scroll", border=False, autoscroll=True):
+            for i, msg in enumerate(st.session_state.messages):
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
 
-                # Show sources for assistant messages that used RAG
-                if msg["role"] == "assistant" and msg.get("sources"):
-                    render_sources(msg["sources"])
+                    # Show sources for assistant messages that used RAG
+                    if msg["role"] == "assistant" and msg.get("sources"):
+                        render_sources(msg["sources"])
 
-    # ── Chat Input ───────────────────────────────────────────────────
-    # Render chat input at the root level so it's pinned to the bottom of the screen
-    if prompt := st.chat_input("Ask about mutual funds, your loan, or financial products..."):
-        # Display user message
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        
-        # Render the new messages INSIDE the left column to maintain symmetry
-        with chat_col:
-            with st.chat_message("user"):
-                st.markdown(prompt)
-
-            # Get agent response
-            with st.chat_message("assistant"):
-                with st.spinner("🤔 Thinking..."):
-                    try:
-                        agent = get_chat_agent()
-
-                        # Build chat history (exclude sources metadata for LLM)
-                        chat_history = [
-                            {"role": m["role"], "content": m["content"]}
-                            for m in st.session_state.messages[:-1]  # exclude current message
-                        ]
-
-                        result = agent.invoke(
-                            user_input=prompt,
-                            chat_history=chat_history,
-                            customer_identifier=st.session_state.customer["identifier"],
-                        )
-
-                        response_text = result["response"]
-                        sources = result.get("sources", [])
-
-                        st.markdown(response_text)
-
-                        if sources:
-                            render_sources(sources)
-
-                        # Save to session state
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "content": response_text,
-                            "sources": sources,
-                            "used_rag": result.get("used_rag", False),
-                        })
-
-                    except Exception as e:
-                        error_msg = f"Sorry, I encountered an error: {str(e)}"
-                        st.error(error_msg)
-                        logger.exception("Agent invocation failed")
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "content": error_msg,
-                            "sources": [],
-                        })
+    # ── Query bar (text + mic + send, ChatGPT-style) ─────────────────
+    # Rendered in the left chat column so the mic sits right next to Send.
+    render_chat_composer(chat_col)
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────

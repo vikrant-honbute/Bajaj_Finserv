@@ -39,7 +39,7 @@ graph TD
 
 ## Models & Technology Stack
 
-- **Language Model**: **Llama 3.3 70B** accessed via **Groq API** for lightning-fast inference and superior reasoning capabilities.
+- **Language Model**: **openai/gpt-oss-20b** (OpenAI GPT-OSS-20B) accessed via **Groq API** for lightning-fast inference and superior reasoning capabilities.
 - **Frontend**: **Streamlit** (with custom CSS for a premium, responsive UI).
 - **Orchestration**: **LangChain** & **LangGraph**.
 - **Vector Database**: **FAISS** (Lightweight, local vector store suitable for rapid prototyping).

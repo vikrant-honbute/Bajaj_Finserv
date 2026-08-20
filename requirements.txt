@@ -19,5 +19,6 @@ langchain-text-splitters
 unstructured[pdf]
 unstructured-inference
 langchain-groq
+groq
 pydantic>=2.0
 

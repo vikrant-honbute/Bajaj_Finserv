@@ -1,7 +1,7 @@
 """
 Main Chat Agent — the single orchestrator for the Bajaj Finserv AI Assistant.
 
-Uses LangChain with Groq (Llama 3.3 70B) as the LLM backbone.
+Uses LangChain with Groq (openai/gpt-oss-20b) as the LLM backbone.
 Has access to tools (RAG Agent for factsheet queries) and maintains
 conversation memory per session.
 """
@@ -80,7 +80,7 @@ def evaluate_cross_sell(customer_identifier: str) -> str:
 
 # ── LLM Configuration ────────────────────────────────────────────────────────
 
-DEFAULT_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_MODEL = "openai/gpt-oss-20b"
 DEFAULT_TEMPERATURE = 0.3
 MAX_TOKENS = 4096
 
