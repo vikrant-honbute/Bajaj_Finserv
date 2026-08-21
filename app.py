@@ -169,6 +169,33 @@ st.markdown("""
         padding-top: 2rem;
     }
 
+    /* App background — consistent light theme (prevents black/blank voids) */
+    [data-testid="stAppViewer"] {
+        background: linear-gradient(135deg, #F4F7FC 0%, #EDF2FA 100%);
+    }
+    [data-testid="stMainBlockContainer"] {
+        background: transparent;
+    }
+
+    /* Chat empty-state */
+    .chat-empty {
+        text-align: center;
+        color: #5A6F8A;
+        font-size: 0.95rem;
+        padding: 3.5rem 1rem;
+        opacity: 0.9;
+    }
+
+    /* Chat composer bar — clean, light, attached to the bottom of the chat */
+    /* (bordered container produced by st.container(border=True)) */
+    .composer-hint {
+        font-size: 0.7rem;
+        color: #8BAADB;
+        text-align: center;
+        margin-top: -0.5rem;
+        margin-bottom: 0.25rem;
+    }
+
     /* Expander styling */
     .streamlit-expanderHeader {
         font-size: 0.85rem;
@@ -832,16 +859,22 @@ def render_chat():
         return
 
     # ── Layout ───────────────────────────────────────────────────────
-    chat_col, reco_col = st.columns([7, 3])
+    chat_col, reco_col = st.columns([7, 3], gap="medium", vertical_alignment="top")
 
     with reco_col:
         # ── Personalized Recommendations (if eligible) ───────────────────
         render_recommendations()
 
     with chat_col:
-        # ── Chat History (fixed-height scroll so the composer stays visible) ──
-        with st.container(height=520, key="chat_history_scroll", border=False, autoscroll=True):
-            for i, msg in enumerate(st.session_state.messages):
+        # ── Chat History (natural flow — no fixed box, so no blank void) ──
+        if not st.session_state.messages:
+            st.markdown(
+                '<div class="chat-empty">👋 Ask about your loan, mutual funds, '
+                'or tap the 🎤 mic and ask by voice.</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            for msg in st.session_state.messages:
                 with st.chat_message(msg["role"]):
                     st.markdown(msg["content"])
 
@@ -849,9 +882,9 @@ def render_chat():
                     if msg["role"] == "assistant" and msg.get("sources"):
                         render_sources(msg["sources"])
 
-    # ── Query bar (text + mic + send, ChatGPT-style) ─────────────────
-    # Rendered in the left chat column so the mic sits right next to Send.
-    render_chat_composer(chat_col)
+        # ── Query bar (text + mic + send) attached to the chat column ───
+        st.caption("")  # small breathing room above the composer
+        render_chat_composer(chat_col)
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
