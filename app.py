@@ -167,6 +167,7 @@ st.markdown("""
     /* Remove default Streamlit padding */
     .block-container {
         padding-top: 2rem;
+        padding-bottom: 8rem; /* room so last message scrolls above the pinned composer */
     }
 
     /* App background — consistent light theme (prevents black/blank voids) */
@@ -175,6 +176,21 @@ st.markdown("""
     }
     [data-testid="stMainBlockContainer"] {
         background: transparent;
+    }
+
+    /* Chat composer — pinned to the bottom of the viewport, within the content
+       column (avoids the sidebar and keeps alignment with the chat above). */
+    [data-testid="stVerticalBlockBorderWrapper"] {
+        position: sticky;
+        bottom: 0;
+        z-index: 1000;
+        background: rgba(255, 255, 255, 0.95);
+        backdrop-filter: blur(14px);
+        -webkit-backdrop-filter: blur(14px);
+        border-top: 1px solid rgba(0, 59, 142, 0.14);
+        border-radius: 0;
+        box-shadow: 0 -6px 24px rgba(0, 59, 142, 0.08);
+        padding: 0.6rem 1.2rem;
     }
 
     /* Chat empty-state */
@@ -186,8 +202,7 @@ st.markdown("""
         opacity: 0.9;
     }
 
-    /* Chat composer bar — clean, light, attached to the bottom of the chat */
-    /* (bordered container produced by st.container(border=True)) */
+    /* Chat composer hint */
     .composer-hint {
         font-size: 0.7rem;
         color: #8BAADB;
@@ -762,11 +777,8 @@ def _process_recorded_voice(mic, chat_scroll):
         st.error("Sorry, I couldn't hear anything. Please try recording again.")
         return
 
-    # Reset the mic so it is ready for the next recording.
-    try:
-        st.session_state["composer_mic"] = None
-    except Exception:
-        pass
+    # Ask the next run to reset the mic (delete its key before re-instantiation).
+    st.session_state["composer_mic_clear_flag"] = True
 
     # Auto-send the transcribed question through the existing chat flow.
     submit_user_message(transcript, chat_scroll)
@@ -774,20 +786,33 @@ def _process_recorded_voice(mic, chat_scroll):
 
 def render_chat_composer(chat_scroll):
     """
-    ChatGPT-style query bar: text box, mic, and Send in one row.
+    Fixed bottom query bar: text box, mic, and Send in one row.
+
+    Rendered at the root level so it can be truly pinned to the bottom of the
+    viewport (ChatGPT-style), aligned under the chat column. The right spacer
+    column keeps the controls lined up with the chat area above.
 
     - Type and press Enter (or click Send) to send text.
     - Click the mic to record; the question is transcribed by Groq Whisper and
       sent automatically the moment the recording stops.
     """
     with st.container(border=True, key="chat_composer"):
-        c_input, c_mic, c_send = st.columns(
-            [1.0, 0.18, 0.26],
-            vertical_alignment="center",
-            gap="small",
-        )
+        # 7/3 split mirrors the chat/recommendations columns above, so the
+        # input row stays horizontally aligned with the chat area.
+        bar_main, _bar_spacer = st.columns([7, 3], gap="medium", vertical_alignment="center")
+
+        with bar_main:
+            c_input, c_mic, c_send = st.columns(
+                [1.0, 0.18, 0.26],
+                vertical_alignment="center",
+                gap="small",
+            )
 
         with c_input:
+            # Clear the input box for the next message: delete the widget's session
+            # key BEFORE the widget is instantiated (you cannot mutate a live widget key).
+            if st.session_state.pop("composer_clear_flag", False):
+                st.session_state.pop("composer_input", None)
             typed = st.text_input(
                 "Ask a question",
                 key="composer_input",
@@ -796,6 +821,10 @@ def render_chat_composer(chat_scroll):
             )
 
         with c_mic:
+            # Reset the mic for the next recording: delete its session key BEFORE
+            # the widget is instantiated (you cannot mutate a live widget key).
+            if st.session_state.pop("composer_mic_clear_flag", False):
+                st.session_state.pop("composer_mic", None)
             mic = st.audio_input(
                 "Record a question",
                 key="composer_mic",
@@ -825,7 +854,8 @@ def render_chat_composer(chat_scroll):
         prompt = (typed or "").strip()
         if prompt:
             submit_user_message(prompt, chat_scroll)
-            st.session_state["composer_input"] = ""
+            # Ask the next run to start with an empty, fresh input box.
+            st.session_state["composer_clear_flag"] = True
             st.rerun()
 
 
@@ -882,9 +912,10 @@ def render_chat():
                     if msg["role"] == "assistant" and msg.get("sources"):
                         render_sources(msg["sources"])
 
-        # ── Query bar (text + mic + send) attached to the chat column ───
-        st.caption("")  # small breathing room above the composer
-        render_chat_composer(chat_col)
+    # ── Fixed bottom query bar (ChatGPT-style) ──────────────────────
+    # Rendered at root level so it can be pinned to the bottom of the viewport,
+    # with the controls aligned under the chat column.
+    render_chat_composer(chat_col)
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
